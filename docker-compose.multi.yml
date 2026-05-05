@@ -1,0 +1,87 @@
+# syntax=docker/dockerfile:1.6
+# Hermes Workspace — Multi-Tenant Docker Compose Configuration
+#
+# Usage:
+#   TENANT_ID=acme BASE_PORT=3010 \
+#     docker compose -f docker-compose.yml -f docker-compose.multi.yml up
+#
+# Port allocation per tenant:
+#   workspace UI   : BASE_PORT              (e.g. 3010 → container 3000)
+#   gateway API    : BASE_PORT + 5642       (e.g. 8652 → container 8642)
+#   dashboard      : BASE_PORT + 6119       (e.g. 9129 → container 9119)
+#
+# For BASE_PORT=3010: workspace=3010, gateway=8652, dashboard=9129
+#
+# Data directory: ~/hermes-agents/<tenant>/  (agent config, sessions, state)
+# The tenantctl.sh script handles this automatically.
+
+services:
+  hermes-agent:
+    image: nousresearch/hermes-agent:latest
+    container_name: hermes-agent-${TENANT_ID:-default}
+    environment:
+      TENANT_ID: ${TENANT_ID:-default}
+      BASE_PORT: ${BASE_PORT:-3000}
+      # Remap hermes UID/GID to match the host user so bind-mounted
+      # ~/hermes-agents/<tenant>/ directories are accessible on the host.
+      HERMES_UID: "${UID:-1000}"
+      HERMES_GID: "${GID:-1000}"
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
+      API_SERVER_KEY: ${API_SERVER_KEY:-}
+      API_SERVER_HOST: ${API_SERVER_HOST:-0.0.0.0}
+      API_SERVER_ENABLED: 'true'
+      # Start dashboard alongside gateway
+      HERMES_DASHBOARD: '1'
+      HERMES_DASHBOARD_HOST: '0.0.0.0'
+      HERMES_DASHBOARD_PORT: '9119'
+    command: ["hermes", "gateway", "run"]
+    volumes:
+      - ${HERMES_AGENTS_DIR:-~/hermes-agents}/${TENANT_ID:-default}:/opt/data
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -fsS http://localhost:8642/health || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    ports:
+      - '${GATEWAY_PORT:-8652}:8642'
+      - '${DASHBOARD_PORT:-9129}:9119'
+
+  hermes-workspace:
+    image: ghcr.io/outsourc-e/hermes-workspace:latest
+    container_name: hermes-workspace-${TENANT_ID:-default}
+    # Run as root to avoid permission issues with bind mounts. The workspace
+    # image defaults to USER workspace (UID 10010), but that UID doesn't exist
+    # on the host, causing EACCES when creating directories in bind-mounted
+    # host directories owned by the host user.
+    user: "0:0"
+    # Override entrypoint to create /home/workspace/ before starting.
+    # The workspace Dockerfile doesn't create this directory, causing EACCES.
+    entrypoint: ['sh', '-c', 'mkdir -p /home/workspace && chown 10010:10010 /home/workspace && exec /usr/bin/tini -- node --max-old-space-size=2048 server-entry.js']
+    depends_on:
+      hermes-agent:
+        condition: service_healthy
+    environment:
+      TENANT_ID: ${TENANT_ID:-default}
+      BASE_PORT: ${BASE_PORT:-3000}
+      # Use container hostnames — Docker's embedded DNS resolves hermes-agent
+      # to the agent container's IP automatically in the shared network.
+      HERMES_API_URL: http://hermes-agent:8642
+      HERMES_DASHBOARD_URL: http://hermes-agent:9119
+      HERMES_API_TOKEN: ${API_SERVER_KEY:-}
+      HERMES_PASSWORD: ${HERMES_PASSWORD:-}
+      HOST: '0.0.0.0'
+      COOKIE_SECURE: ${COOKIE_SECURE:-0}
+      TRUST_PROXY: ${TRUST_PROXY:-}
+      HERMES_SESSION_DIR: /app/.hermes-sessions
+      HERMES_HOME: /app/.hermes-sessions
+    volumes:
+      - ${HERMES_AGENTS_DIR:-~/hermes-agents}/${TENANT_ID:-default}/sessions:/app/.hermes-sessions
+    ports:
+      # Workspace UI: BASE_PORT (e.g. 3010 for BASE_PORT=3010)
+      - '${BASE_PORT:-3000}:3000'

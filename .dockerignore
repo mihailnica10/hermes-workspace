@@ -3,3 +3,6 @@ node_modules
 dist
 .git
 .env
+data/
+.tenants/
+*.log

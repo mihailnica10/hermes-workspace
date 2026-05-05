@@ -558,13 +558,21 @@ export function isLocalhostDeployment(): boolean {
   const isLoopbackUrl = (raw: string): boolean => {
     try {
       const u = new URL(raw)
-      return isLoopbackHost(u.hostname)
+      if (isLoopbackHost(u.hostname)) return true
+      // Accept known Docker container hostnames that resolve to loopback via extra_hosts.
+      // hermes-agent resolves to 127.0.0.1 inside hermes-workspace containers.
+      const knownLocalhostAliases = ['hermes-agent', 'hermes-agent-misumn']
+      if (knownLocalhostAliases.includes(u.hostname)) return true
+      return false
     } catch {
       return false
     }
   }
   const host = (process.env.HOST || '').trim()
-  if (host && !isLoopbackHost(host)) return false
+  // In Docker/Kubernetes environments HOST=0.0.0.0 is common — only block if
+  // HOST is explicitly set to a reachable non-loopback IP (e.g. 192.168.x.x).
+  // We check URL loopback instead, which is the actual security boundary.
+  if (host && !['', '0.0.0.0', '::', '::1', '0.0.0.1'].includes(host.toLowerCase()) && !isLoopbackHost(host)) return false
   return isLoopbackUrl(CLAUDE_API) && isLoopbackUrl(CLAUDE_DASHBOARD_URL)
 }
 

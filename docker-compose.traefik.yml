@@ -1,0 +1,87 @@
+# syntax=docker/dockerfile:1.6
+# Hermes Workspace — Traefik Reverse-Proxy Multi-Tenant Configuration
+#
+# This overlay runs a Traefik reverse proxy in front of hermes-workspace, enabling
+# true multi-tenant deployments where each tenant is identified by subdomain
+# (e.g. acme.homelab.local, globex.homelab.local) rather than port numbers.
+#
+# Requirements:
+#   - Docker Compose v2.24+ with compose plugin
+#   - Traefik v3.x (configured below)
+#   - Wildcard DNS or /etc/hosts entries for *.homelab.local
+#   - TLS certificates (or Traefik's auto-generated self-signed for testing)
+#
+# Usage:
+#   DOMAIN=homelab.local TENANT_SECRET=secret docker compose \
+#     -f docker-compose.yml -f docker-compose.traefik.yml up -d
+#
+#   # Add a new tenant
+#   TENANT_ID=acme docker compose -f docker-compose.yml -f docker-compose.traefik.yml up -d
+#
+# DNS /etc/hosts entries needed:
+#   127.0.0.1  traefik.homelab.local acme.homelab.local globex.homelab.local
+#
+# ─────────────────────────────────────────────────────────────────────────────
+
+x-common-env: &common-env
+  DOMAIN: ${DOMAIN:-homelab.local}
+  TRAEFIK_DOMAIN: traefik.${DOMAIN:-homelab.local}
+  # TLS cert path — set to your certs dir or leave empty for self-signed
+  TLS_CERTS: ${TLS_CERTS:-}
+
+services:
+  traefik:
+    image: traefik:v3.4
+    container_name: hermes-traefik
+    command:
+      # HTTP to HTTPS redirect (enable in production with valid certs)
+      # - "--entrypoints.web.http.redirections.entryPoint.to=websecure"
+      # - "--entrypoints.web.http.redirections.entryScheme.scheme=https"
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.network=hermes-network"
+      - "--log.level=INFO"
+      # Let's Encrypt (uncomment and configure email for production)
+      # - "--certificatesresolvers.letsencrypt.acme.email=admin@${DOMAIN}"
+      # - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
+      # - "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web"
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8090:8080"  # Traefik dashboard (traefik.homelab.local:8090)
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./data/traefik/certs:/letsencrypt:rw
+      - ./data/traefik/acme.json:/acme.json:rw
+    networks:
+      - hermes-network
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.dashboard.rule: "Host(`traefik.${DOMAIN:-homelab.local}`)"
+      traefik.http.routers.dashboard.service: "api@internal"
+
+  # Tenant-specific workspace (example: "acme")
+  # Duplicate this service block with different TENANT_ID for each tenant.
+  # The tenantctl.sh script handles this automatically.
+  hermes-agent:
+    <<: *common-env
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.agent-${TENANT_ID:-default}.rule: "Host(`agent.${DOMAIN:-homelab.local}`)"
+      traefik.http.routers.agent-${TENANT_ID:-default}.entrypoints: web
+      traefik.http.services.agent-${TENANT_ID:-default}.loadbalancer.server.port: 8642
+
+  hermes-workspace:
+    <<: *common-env
+    labels:
+      traefik.enable: "true"
+      # Route by subdomain: acme.homelab.local -> workspace for TENANT_ID=acme
+      traefik.http.routers.ws-${TENANT_ID:-default}.rule: "Host(`workspace.${DOMAIN:-homelab.local}`)"
+      traefik.http.routers.ws-${TENANT_ID:-default}.entrypoints: web
+      traefik.http.services.ws-${TENANT_ID:-default}.loadbalancer.server.port: 3000
+
+networks:
+  hermes-network:
+    name: hermes-network
+    driver: bridge
